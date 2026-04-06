@@ -39,22 +39,21 @@ if img_file:
         except:
             pass
 
-    # 3. PDF生成用のBase64変換（最高画質設定）
+    # 3. 画像のBase64変換（最高画質設定）
     buffered = io.BytesIO()
     img.save(buffered, format="JPEG", quality=100, subsampling=0)
     img_str = base64.b64encode(buffered.getvalue()).decode()
 
-    # 4. 全自動JavaScript（ファイル名順序変更：タイトル_住所）
+    # 4. 全自動JavaScript（画像加工・JPG保存）
     st.success(f"タイトル確定: {ai_title}")
     
     auto_save_script = f"""
-    <div id="status" style="font-size:12px; color:gray; padding:5px;">位置情報を取得して自動保存します...</div>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <div id="status" style="font-size:12px; color:gray; padding:5px;">位置情報を取得して画像に文字を埋め込み保存します...</div>
     <script>
     (async function() {{
         const status = document.getElementById('status');
         const aiTitle = "{ai_title}";
-        const imgData = "data:image/jpeg;base64,{img_str}";
+        const imgBase64 = "data:image/jpeg;base64,{img_str}";
         const originalWidth = {width};
         const originalHeight = {height};
 
@@ -69,37 +68,52 @@ if img_file:
                     let finalAddr = (addr.city || "") + (addr.suburb || "") + (addr.city_district || "") + (addr.neighbourhood || "");
                     if(!finalAddr) finalAddr = "住所不明";
                     
-                    // ファイル名の順番を「タイトル_住所」に変更
-                    const fileName = aiTitle + "_" + finalAddr + ".pdf";
-                    status.innerText = "保存実行中: " + fileName;
+                    const displayText = aiTitle + " _ " + finalAddr;
+                    const fileName = aiTitle + "_" + finalAddr + ".jpg";
 
-                    // PDF生成
-                    const {{ jsPDF }} = window.jspdf;
-                    const doc = new jsPDF();
+                    // Canvasを使用して画像を加工
+                    const canvas = document.createElement('canvas');
+                    const ctx = canvas.getContext('2d');
+                    const img = new Image();
                     
-                    // アスペクト比を維持したサイズ計算
-                    const maxWidth = 190;
-                    const maxHeight = 260;
-                    let printWidth = maxWidth;
-                    let printHeight = (originalHeight * maxWidth) / originalWidth;
-
-                    if (printHeight > maxHeight) {{
-                        printHeight = maxHeight;
-                        printWidth = (originalWidth * maxHeight) / originalHeight;
-                    }}
-
-                    // 画像をPDFに配置（圧縮なし）
-                    doc.addImage(imgData, 'JPEG', 10, 20, printWidth, printHeight, undefined, 'NONE');
-                    
-                    // 自動保存実行
-                    doc.save(fileName);
-                    status.innerText = "✅ 保存完了しました: " + fileName;
+                    img.onload = function() {{
+                        canvas.width = originalWidth;
+                        canvas.height = originalHeight;
+                        
+                        // 元画像を描画
+                        ctx.drawImage(img, 0, 0, originalWidth, originalHeight);
+                        
+                        // 文字のスタイル設定（画像サイズに合わせて調整）
+                        const fontSize = Math.floor(originalHeight / 25); 
+                        ctx.font = "bold " + fontSize + "px sans-serif";
+                        ctx.textBaseline = "top";
+                        
+                        // テキストの背景（可読性向上のため）
+                        const textMetrics = ctx.measureText(displayText);
+                        const padding = fontSize / 2;
+                        ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
+                        ctx.fillRect(10, 10, textMetrics.width + (padding * 2), fontSize + (padding * 2));
+                        
+                        // テキストを描画
+                        ctx.fillStyle = "white";
+                        ctx.fillText(displayText, 10 + padding, 10 + padding);
+                        
+                        // 加工後の画像をダウンロード
+                        const link = document.createElement('a');
+                        link.download = fileName;
+                        link.href = canvas.toDataURL('image/jpeg', 1.0); // 最高画質
+                        link.click();
+                        
+                        status.innerText = "✅ 画像内に文字を埋め込み保存しました: " + fileName;
+                    }};
+                    img.src = imgBase64;
 
                 }} catch (err) {{ 
-                    status.innerText = "エラーのためタイトルのみで保存を試みます";
-                    const doc = new window.jspdf.jsPDF();
-                    doc.addImage(imgData, 'JPEG', 10, 20, 180, 135);
-                    doc.save(aiTitle + ".pdf");
+                    status.innerText = "エラーのため加工なしで保存します";
+                    const link = document.createElement('a');
+                    link.download = aiTitle + ".jpg";
+                    link.href = imgBase64;
+                    link.click();
                 }}
             }},
             (err) => {{ status.innerText = "位置情報を許可してください"; }},

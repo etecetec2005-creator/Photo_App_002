@@ -13,104 +13,99 @@ if not api_key:
 
 genai.configure(api_key=api_key)
 
-def get_working_model():
-    try:
-        models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        flash_models = [m for m in models if "gemini-1.5-flash" in m]
-        if flash_models:
-            return flash_models[0]
-        return models[0]
-    except Exception:
-        return "gemini-1.5-flash"
-
 st.set_page_config(page_title="自動写真保存", layout="centered")
 st.title("📸 写真の中身")
 
-img_file = st.camera_input("写真を撮る", key="fixed_camera_id")
+img_file = st.camera_input("写真を撮る")
 
 if img_file:
+    # 1. 画像の読み込み
     img = Image.open(img_file)
-    width, height = img.size
-    st.image(img, caption="解析・保存プロセスを開始します...")
+    width, height = img.size # 画像の元サイズを取得
+    st.image(img, caption="解析・保存中...")
 
+    # 2. AI解析（タイトル生成）
     ai_title = "名称未設定"
-    target_model = get_working_model()
-    
-    with st.spinner("AI解析中..."):
+    with st.spinner("AIが解析しています..."):
         try:
+            available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+            target_model = next((m for m in available_models if 'gemini-1.5-flash' in m), available_models[0])
             model = genai.GenerativeModel(target_model)
-            response = model.generate_content(["この写真に10文字以内の日本語タイトルを1つ付けて。回答はタイトルのみ。", img])
-            ai_title = response.text.strip().replace("\n", "").replace("/", "-")
-        except Exception as e:
-            st.warning(f"タイトル生成スキップ: {e}")
+            prompt = "この写真の内容を分析し、短い日本語タイトル（15文字以内）を1つ。結果のみ。"
+            response = model.generate_content([prompt, img])
+            if response.text:
+                # ファイル名に使えない文字を置換
+                ai_title = response.text.strip().replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").replace("/", "-")
+        except:
+            pass
 
+    # 3. PDF生成用のBase64変換（最高画質設定）
     buffered = io.BytesIO()
     img.save(buffered, format="JPEG", quality=100, subsampling=0)
     img_str = base64.b64encode(buffered.getvalue()).decode()
 
-    # JavaScriptの修正：エラーハンドリングを強化
-    full_process_script = f"""
-    <div id="save-status" style="padding:10px; background:#f0f2f6; border-radius:5px; color:#1f77b4; font-weight:bold;">
-        📍 位置情報を確認中... (許可ダイアログが出たら承認してください)
-    </div>
+    # 4. 全自動JavaScript（ファイル名順序変更：タイトル_住所）
+    st.success(f"タイトル確定: {ai_title}")
+    
+    auto_save_script = f"""
+    <div id="status" style="font-size:12px; color:gray; padding:5px;">位置情報を取得して自動保存します...</div>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <script>
     (async function() {{
-        const statusDiv = document.getElementById('save-status');
+        const status = document.getElementById('status');
         const aiTitle = "{ai_title}";
         const imgData = "data:image/jpeg;base64,{img_str}";
-        const {{ jsPDF }} = window.jspdf;
+        const originalWidth = {width};
+        const originalHeight = {height};
 
-        const savePDF = (addr = "住所不明", station = "駅不明") => {{
-            const doc = new jsPDF();
-            const oW = {width};
-            const oH = {height};
-            const maxW = 190;
-            const maxH = 260;
-            let pW = maxW;
-            let pH = (oH * maxW) / oW;
-            if (pH > maxH) {{
-                pH = maxH;
-                pW = (oW * maxH) / oH;
-            }}
-            doc.addImage(imgData, 'JPEG', 10, 20, pW, pH, undefined, 'NONE');
-            const fileName = aiTitle + "_" + addr.replace(/[/\\\\?%*:|"<>]/g, '-') + "_" + station + ".pdf";
-            doc.save(fileName);
-            statusDiv.style.color = "green";
-            statusDiv.innerText = "✅ 保存完了: " + fileName;
-        }};
-
-        navigator.geolocation.getCurrentPosition(async (pos) => {{
-            try {{
-                const lat = pos.coords.latitude;
-                const lon = pos.coords.longitude;
-
-                // 住所特定
-                const addrRes = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${{lat}}&lon=${{lon}}&accept-language=ja`);
-                const addrData = await addrRes.json();
-                const a = addrData.address;
-                const finalAddr = (a.city || a.town || "") + (a.suburb || "") + (a.city_district || "") + (a.neighbourhood || "");
-                
-                // 駅検索
-                let stationName = "駅不明";
+        navigator.geolocation.getCurrentPosition(
+            async (pos) => {{
                 try {{
-                    const query = `[out:json];node(around:1000,${{lat}},${{lon}})[railway=station];out;`;
-                    const sRes = await fetch("https://overpass-api.de/api/interpreter?data=" + encodeURIComponent(query));
-                    const sData = await sRes.json();
-                    if (sData.elements.length > 0) stationName = sData.elements[0].tags.name || "駅名なし";
-                }} catch(e) {{}}
+                    const response = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${{pos.coords.latitude}}&lon=${{pos.coords.longitude}}`, {{
+                        headers: {{ 'Accept-Language': 'ja' }}
+                    }});
+                    const data = await response.json();
+                    const addr = data.address;
+                    let finalAddr = (addr.city || "") + (addr.suburb || "") + (addr.city_district || "") + (addr.neighbourhood || "");
+                    if(!finalAddr) finalAddr = "住所不明";
+                    
+                    // ファイル名の順番を「タイトル_住所」に変更
+                    const fileName = aiTitle + "_" + finalAddr + ".pdf";
+                    status.innerText = "保存実行中: " + fileName;
 
-                savePDF(finalAddr || "住所不明", stationName);
-            }} catch (err) {{
-                savePDF("住所取得エラー", "駅不明");
-            }}
-        }}, (err) => {{
-            // 位置情報が拒否された場合でも保存だけは実行する
-            savePDF("位置情報なし", "不明");
-            statusDiv.style.color = "orange";
-            statusDiv.innerText = "⚠️ 位置情報なしで保存しました（ブラウザ設定で許可すると住所が入ります）";
-        }}, {{ enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }});
+                    // PDF生成
+                    const {{ jsPDF }} = window.jspdf;
+                    const doc = new jsPDF();
+                    
+                    // アスペクト比を維持したサイズ計算
+                    const maxWidth = 190;
+                    const maxHeight = 260;
+                    let printWidth = maxWidth;
+                    let printHeight = (originalHeight * maxWidth) / originalWidth;
+
+                    if (printHeight > maxHeight) {{
+                        printHeight = maxHeight;
+                        printWidth = (originalWidth * maxHeight) / originalHeight;
+                    }}
+
+                    // 画像をPDFに配置（圧縮なし）
+                    doc.addImage(imgData, 'JPEG', 10, 20, printWidth, printHeight, undefined, 'NONE');
+                    
+                    // 自動保存実行
+                    doc.save(fileName);
+                    status.innerText = "✅ 保存完了しました: " + fileName;
+
+                }} catch (err) {{ 
+                    status.innerText = "エラーのためタイトルのみで保存を試みます";
+                    const doc = new window.jspdf.jsPDF();
+                    doc.addImage(imgData, 'JPEG', 10, 20, 180, 135);
+                    doc.save(aiTitle + ".pdf");
+                }}
+            }},
+            (err) => {{ status.innerText = "位置情報を許可してください"; }},
+            {{ enableHighAccuracy: true }}
+        );
     }})();
     </script>
     """
-    st.components.v1.html(full_process_script, height=120)
+    st.components.v1.html(auto_save_script, height=100)

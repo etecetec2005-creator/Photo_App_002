@@ -16,112 +16,110 @@ genai.configure(api_key=api_key)
 st.set_page_config(page_title="自動写真保存", layout="centered")
 st.title("📸 写真の中身")
 
-# --- 住所取得用スクリプト (撮影前に住所を確定) ---
-# window.parent.postMessage を使い、Streamlitのコンポーネント経由でPythonに住所を戻す
-st.components.v1.html("""
-<script>
-    const sendToStreamlit = (data) => {
-        window.parent.postMessage({
-            type: 'streamlit:setComponentValue',
-            value: data
-        }, '*');
-    };
+# セッション状態で進捗を管理
+if "step" not in st.session_state:
+    st.session_state.step = "input"
+if "title" not in st.session_state:
+    st.session_state.title = ""
+if "address" not in st.session_state:
+    st.session_state.address = ""
 
-    navigator.geolocation.getCurrentPosition(async (pos) => {
-        try {
-            const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${pos.coords.latitude}&lon=${pos.coords.longitude}`, {
-                headers: { 'Accept-Language': 'ja' }
-            });
-            const data = await res.json();
-            const addr = data.address;
-            const finalAddr = (addr.city || "") + (addr.suburb || "") + (addr.city_district || "") + (addr.neighbourhood || "");
-            sendToStreamlit(finalAddr || "住所不明");
-        } catch (e) {
-            sendToStreamlit("住所取得失敗");
-        }
-    }, (err) => {
-        sendToStreamlit("位置情報許可なし");
-    }, { enableHighAccuracy: true });
-</script>
-""", height=0)
+# 1. 写真撮影
+img_file = st.camera_input("写真を撮る", key="camera", on_change=lambda: st.session_state.update({"step": "analyze_title"}))
 
-# JSからの戻り値を st.query_params などではなくコンポーネントの値として受け取る
-# ※以下の camera_input より上に配置することで撮影時に住所が確定している確率を高めます
-current_addr = st.session_state.get("last_addr", "住所取得中...")
-
-img_file = st.camera_input("写真を撮る")
-
-if img_file:
-    # 1. 画像の読み込み
+if img_file and st.session_state.step == "analyze_title":
+    # 2. AIタイトル付与（まず写真だけ見て決める）
     img = Image.open(img_file)
-    width, height = img.size
-    st.image(img, caption="解析・保存中...")
-
-    # 2. AI解析（タイトル生成 ＋ 住所からの最寄駅特定）
-    ai_title = "名称未設定"
-    near_station = "駅名特定中"
-    
-    with st.spinner("AIがタイトルと最寄駅を特定しています..."):
+    with st.spinner("AIタイトルを生成中..."):
         try:
-            available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-            target_model = next((m for m in available_models if 'gemini-1.5-flash' in m), available_models[0])
-            model = genai.GenerativeModel(target_model)
-            
-            # AIに「この住所の最寄駅」と「タイトル」を同時に答えさせる
-            prompt = f"""
-            以下の情報に基づいて回答してください。
-            【現在の住所】: {current_addr}
-
-            指示:
-            1. 提供された【現在の住所】から判断して、最も近い「駅名」を1つ答えてください（例: 新大阪駅）。
-            2. 写真の内容を分析し、15文字以内の短い「タイトル」を付けてください。
-
-            回答形式（これ以外出力しないでください）:
-            タイトル: [タイトル]
-            駅名: [駅名]
-            """
-            response = model.generate_content([prompt, img])
-            if response.text:
-                lines = response.text.split("\n")
-                for line in lines:
-                    if "タイトル:" in line:
-                        ai_title = line.replace("タイトル:", "").strip().replace("/", "-")
-                    if "駅名:" in line:
-                        near_station = line.replace("駅名:", "").strip().replace("/", "-")
+            model = genai.GenerativeModel('gemini-1.5-flash')
+            response = model.generate_content(["この写真に15文字以内のタイトルを1つ付けて。結果のみ。", img])
+            st.session_state.title = response.text.strip().replace("/", "-")
+            st.session_state.step = "get_address"
+            st.rerun()
         except:
-            pass
+            st.session_state.title = "名称未設定"
+            st.session_state.step = "get_address"
+            st.rerun()
 
-    # 3. PDF生成用のBase64変換（最高画質）
-    buffered = io.BytesIO()
-    img.save(buffered, format="JPEG", quality=100, subsampling=0)
-    img_str = base64.b64encode(buffered.getvalue()).decode()
-
-    # 4. 全自動保存JavaScript
-    st.success(f"確定: {ai_title} / {current_addr} / {near_station}")
+if st.session_state.step == "get_address":
+    # 3. 住所特定（JavaScriptを実行して住所を取得し、URLパラメータにセットして戻る）
+    st.write(f"🏷️ タイトル確定: **{st.session_state.title}**")
+    st.write("📍 現在地を確認しています...")
     
-    save_pdf_script = f"""
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    get_addr_js = """
     <script>
-    (function() {{
-        const fileName = "{ai_title}_{current_addr}_{near_station}.pdf";
-        const {{ jsPDF }} = window.jspdf;
-        const doc = new jsPDF();
-        
-        const originalWidth = {width};
-        const originalHeight = {height};
-        const maxWidth = 190;
-        const maxHeight = 260;
-        let printWidth = maxWidth;
-        let printHeight = (originalHeight * maxWidth) / originalWidth;
-
-        if (printHeight > maxHeight) {{
-            printHeight = maxHeight;
-            printWidth = (originalWidth * maxHeight) / originalHeight;
-        }}
-
-        doc.addImage("data:image/jpeg;base64,{img_str}", 'JPEG', 10, 20, printWidth, printHeight, undefined, 'NONE');
-        doc.save(fileName);
-    }})();
+    navigator.geolocation.getCurrentPosition(async (pos) => {
+        const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${pos.coords.latitude}&lon=${pos.coords.longitude}`, {
+            headers: { 'Accept-Language': 'ja' }
+        });
+        const data = await res.json();
+        const addr = data.address;
+        const f = (addr.city || "") + (addr.suburb || "") + (addr.city_district || "") + (addr.neighbourhood || "");
+        const url = new URL(window.location.href);
+        url.searchParams.set("found_addr", f);
+        window.location.href = url.href; // 住所を持って強制リロード
+    }, (err) => { alert("位置情報を許可してください"); });
     </script>
     """
-    st.components.v1.html(save_pdf_script, height=0)
+    st.components.v1.html(get_addr_js, height=0)
+    
+    # URLから住所が戻ってきたかチェック
+    query_addr = st.query_params.get("found_addr")
+    if query_addr:
+        st.session_state.address = query_addr
+        st.session_state.step = "analyze_station"
+        st.rerun()
+
+if st.session_state.step == "analyze_station":
+    # 4. 改めてAIで駅名特定
+    img = Image.open(img_file)
+    st.write(f"🏷️ タイトル: {st.session_state.title}")
+    st.write(f"📍 住所: {st.session_state.address}")
+    
+    with st.spinner("最寄駅を特定中..."):
+        try:
+            model = genai.GenerativeModel('gemini-1.5-flash')
+            prompt = f"以下の住所から判断して、最も近い「駅名」を1つだけ答えてください。余計な説明は不要です。\n住所：{st.session_state.address}"
+            response = model.generate_content(prompt)
+            station = response.text.strip().replace("/", "-")
+        except:
+            station = "不明"
+
+        # 5. PDF生成・保存（すべての情報が揃った）
+        buffered = io.BytesIO()
+        img.save(buffered, format="JPEG", quality=100, subsampling=0)
+        img_str = base64.b64encode(buffered.getvalue()).decode()
+        width, height = img.size
+
+        st.success(f"保存準備完了: {st.session_state.title} / {station}")
+        
+        save_js = f"""
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+        <script>
+        (function() {{
+            const fileName = "{st.session_state.title}_{st.session_state.address}_{station}.pdf";
+            const {{ jsPDF }} = window.jspdf;
+            const doc = new jsPDF();
+            const originalWidth = {width};
+            const originalHeight = {height};
+            const maxWidth = 190;
+            const maxHeight = 260;
+            let printWidth = maxWidth;
+            let printHeight = (originalHeight * maxWidth) / originalWidth;
+            if (printHeight > maxHeight) {{
+                printHeight = maxHeight;
+                printWidth = (originalWidth * maxHeight) / originalHeight;
+            }}
+            doc.addImage("data:image/jpeg;base64,{img_str}", 'JPEG', 10, 20, printWidth, printHeight, undefined, 'NONE');
+            doc.save(fileName);
+        }})();
+        </script>
+        """
+        st.components.v1.html(save_js, height=0)
+        
+        # 処理が終わったらリセット準備
+        if st.button("完了（次の撮影へ）"):
+            st.session_state.step = "input"
+            st.query_params.clear()
+            st.rerun()

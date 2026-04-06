@@ -13,7 +13,6 @@ if not api_key:
 
 genai.configure(api_key=api_key)
 
-# --- 利用可能なモデルを特定する関数 ---
 def get_working_model():
     try:
         models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
@@ -27,7 +26,6 @@ def get_working_model():
 st.set_page_config(page_title="自動写真保存", layout="centered")
 st.title("📸 写真の中身")
 
-# カメラ入力 (keyを固定して重複エラーを防止)
 img_file = st.camera_input("写真を撮る", key="fixed_camera_id")
 
 if img_file:
@@ -35,7 +33,6 @@ if img_file:
     width, height = img.size
     st.image(img, caption="解析・保存プロセスを開始します...")
 
-    # 1. AIタイトル生成 (Python側)
     ai_title = "名称未設定"
     target_model = get_working_model()
     
@@ -47,16 +44,14 @@ if img_file:
         except Exception as e:
             st.warning(f"タイトル生成スキップ: {e}")
 
-    # 2. 画像のBase64化 (最高画質設定)
     buffered = io.BytesIO()
     img.save(buffered, format="JPEG", quality=100, subsampling=0)
     img_str = base64.b64encode(buffered.getvalue()).decode()
 
-    # 3. JavaScriptによる住所・駅名取得とPDF保存
-    # 全ての波括弧を二重 {{ }} にしてPythonのf-stringエラーを回避
+    # JavaScriptの修正：エラーハンドリングを強化
     full_process_script = f"""
     <div id="save-status" style="padding:10px; background:#f0f2f6; border-radius:5px; color:#1f77b4; font-weight:bold;">
-        📍 現在地を確認してPDFを作成しています...
+        📍 位置情報を確認中... (許可ダイアログが出たら承認してください)
     </div>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <script>
@@ -64,63 +59,57 @@ if img_file:
         const statusDiv = document.getElementById('save-status');
         const aiTitle = "{ai_title}";
         const imgData = "data:image/jpeg;base64,{img_str}";
+        const {{ jsPDF }} = window.jspdf;
+
+        const savePDF = (addr = "住所不明", station = "駅不明") => {{
+            const doc = new jsPDF();
+            const oW = {width};
+            const oH = {height};
+            const maxW = 190;
+            const maxH = 260;
+            let pW = maxW;
+            let pH = (oH * maxW) / oW;
+            if (pH > maxH) {{
+                pH = maxH;
+                pW = (oW * maxH) / oH;
+            }}
+            doc.addImage(imgData, 'JPEG', 10, 20, pW, pH, undefined, 'NONE');
+            const fileName = aiTitle + "_" + addr.replace(/[/\\\\?%*:|"<>]/g, '-') + "_" + station + ".pdf";
+            doc.save(fileName);
+            statusDiv.style.color = "green";
+            statusDiv.innerText = "✅ 保存完了: " + fileName;
+        }};
 
         navigator.geolocation.getCurrentPosition(async (pos) => {{
             try {{
                 const lat = pos.coords.latitude;
                 const lon = pos.coords.longitude;
 
-                // 1. 住所特定 (Nominatim API)
+                // 住所特定
                 const addrRes = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${{lat}}&lon=${{lon}}&accept-language=ja`);
                 const addrData = await addrRes.json();
                 const a = addrData.address;
                 const finalAddr = (a.city || a.town || "") + (a.suburb || "") + (a.city_district || "") + (a.neighbourhood || "");
                 
-                // 2. 最寄駅検索 (Overpass API)
+                // 駅検索
                 let stationName = "駅不明";
                 try {{
                     const query = `[out:json];node(around:1000,${{lat}},${{lon}})[railway=station];out;`;
                     const sRes = await fetch("https://overpass-api.de/api/interpreter?data=" + encodeURIComponent(query));
                     const sData = await sRes.json();
-                    if (sData.elements.length > 0) {{
-                        stationName = sData.elements[0].tags.name || "駅名なし";
-                    }}
-                }} catch(e) {{
-                    console.log("Station fetch error");
-                }}
+                    if (sData.elements.length > 0) stationName = sData.elements[0].tags.name || "駅名なし";
+                }} catch(e) {{}}
 
-                // 3. PDF生成
-                const {{ jsPDF }} = window.jspdf;
-                const doc = new jsPDF();
-                const oW = {width};
-                const oH = {height};
-                const maxW = 190;
-                const maxH = 260;
-                let pW = maxW;
-                let pH = (oH * maxW) / oW;
-                if (pH > maxH) {{
-                    pH = maxH;
-                    pW = (oW * maxH) / oH;
-                }}
-
-                doc.addImage(imgData, 'JPEG', 10, 20, pW, pH, undefined, 'NONE');
-                
-                // ファイル名：タイトル_住所_駅名
-                const safeAddr = (finalAddr || "住所不明").replace(/[/\\\\?%*:|"<>]/g, '-');
-                const fileName = aiTitle + "_" + safeAddr + "_" + stationName + ".pdf";
-                
-                doc.save(fileName);
-                statusDiv.style.color = "green";
-                statusDiv.innerText = "✅ 保存完了: " + fileName;
-
+                savePDF(finalAddr || "住所不明", stationName);
             }} catch (err) {{
-                statusDiv.style.color = "red";
-                statusDiv.innerText = "❌ エラー: 位置情報または保存に失敗しました。";
+                savePDF("住所取得エラー", "駅不明");
             }}
         }}, (err) => {{
+            // 位置情報が拒否された場合でも保存だけは実行する
+            savePDF("位置情報なし", "不明");
             statusDiv.style.color = "orange";
-            statusDiv.innerText = "📍 位置情報を許可して、再度撮影してください。";
-        }}, {{ enableHighAccuracy: true }});
+            statusDiv.innerText = "⚠️ 位置情報なしで保存しました（ブラウザ設定で許可すると住所が入ります）";
+        }}, {{ enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }});
     }})();
     </script>
     """

@@ -13,104 +13,116 @@ if not api_key:
 
 genai.configure(api_key=api_key)
 
+# --- 利用可能なモデルを特定する関数 ---
+def get_working_model():
+    try:
+        # サポートされている最新モデルを探す
+        models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        # gemini-1.5-flash を優先的に探す
+        flash_models = [m for m in models if "gemini-1.5-flash" in m]
+        if flash_models:
+            return flash_models[0]
+        return models[0] # 見つからなければ最初のモデル
+    except Exception:
+        return "gemini-1.5-flash" # 最終フォールバック
+
 st.set_page_config(page_title="自動写真保存", layout="centered")
 st.title("📸 写真の中身")
 
-# 1. 利用可能な最新モデルを自動取得する関数
-def get_model_name():
-    try:
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                if 'gemini-1.5-flash' in m.name:
-                    return m.name
-        return 'models/gemini-pro-vision' # フォールバック
-    except:
-        return 'gemini-1.5-flash'
-
-target_model = get_model_name()
-
-# --- 2. メインUI ---
-# keyを固定して重複エラーを防止
-img_file = st.camera_input("写真を撮る", key="unique_camera_input")
+# カメラ入力 (keyを固定して重複エラーを防止)
+img_file = st.camera_input("写真を撮る", key="fixed_camera_id")
 
 if img_file:
     img = Image.open(img_file)
     width, height = img.size
-    st.image(img, caption="解析を開始します...")
+    st.image(img, caption="解析・保存プロセスを開始します...")
 
-    # 3. AIタイトル付与 (まずは写真のみでタイトルを決める)
+    # 1. AIタイトル生成 (Python側)
     ai_title = "名称未設定"
-    with st.spinner("AIタイトルを生成中..."):
+    target_model = get_working_model()
+    
+    with st.spinner(f"AI解析中... (使用モデル: {target_model})"):
         try:
             model = genai.GenerativeModel(target_model)
-            response = model.generate_content(["この写真に15文字以内のタイトルを1つ付けて。結果のみ。", img])
+            # モデル名エラー対策として、もっともシンプルなプロンプトに
+            response = model.generate_content(["この写真に10文字以内の日本語タイトルを1つ付けて。回答はタイトルのみ。", img])
             ai_title = response.text.strip().replace("\n", "").replace("/", "-")
         except Exception as e:
-            st.error(f"AI解析エラー: {e}")
+            st.error(f"AI解析でエラーが発生しました。タイトルをデフォルトにします。: {e}")
 
-    # 4. JavaScriptで「住所取得」と「駅名特定(AI)」を連携して保存
-    # Python側で高画質画像をBase64化
+    # 2. 画像のBase64化 (高画質設定)
     buffered = io.BytesIO()
     img.save(buffered, format="JPEG", quality=100, subsampling=0)
     img_str = base64.b64encode(buffered.getvalue()).decode()
 
-    st.info(f"タイトル確定: {ai_title}。次に位置情報を取得して保存します。")
-
-    # 全工程をJSで一気に実行（ブラウザ側で完結させることで情報の欠落を防ぐ）
+    # 3. JavaScriptによる住所・駅名取得とPDF保存
+    # ステップ：住所取得 -> 駅名検索(OSM) -> PDF生成
     full_process_script = f"""
-    <div id="status" style="font-size:12px; color:blue; padding:5px;">📍 現在地と最寄駅を確認中...</div>
+    <div id="save-status" style="padding:10px; background:#f0f2f6; border-radius:5px; color:#1f77b4; font-weight:bold;">
+        📍 現在地を確認してPDFを作成しています...
+    </div>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <script>
     (async function() {{
-        const status = document.getElementById('status');
+        const statusDiv = document.getElementById('save-status');
         const aiTitle = "{ai_title}";
         const imgData = "data:image/jpeg;base64,{img_str}";
 
         navigator.geolocation.getCurrentPosition(async (pos) => {{
             try {{
-                // 1. 住所取得
                 const lat = pos.coords.latitude;
                 const lon = pos.coords.longitude;
-                const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${{lat}}&lon=${{lon}}&accept-language=ja`);
-                const data = await res.json();
-                const addr = data.address;
-                const finalAddr = (addr.city || "") + (addr.suburb || "") + (addr.city_district || "") + (addr.neighbourhood || "");
+
+                // 1. 住所特定 (Nominatim API)
+                const addrRes = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${{lat}}&lon=${{lon}}&accept-language=ja`);
+                const addrData = await addrRes.json();
+                const a = addrData.address;
+                const finalAddr = (a.city || a.town || "") + (a.suburb || "") + (a.city_district || "") + (a.neighbourhood || "");
                 
-                // 2. 最寄駅取得 (OSM Overpass APIを使用して論理的に特定)
+                // 2. 最寄駅検索 (Overpass API - 1km圏内の駅)
                 let stationName = "駅不明";
                 try {{
-                    const overpassUrl = `https://overpass-api.de/api/interpreter?data=[out:json];node(around:1500,${{lat}},${{lon}})[railway=station];out;`;
-                    const sRes = await fetch(overpassUrl);
+                    const query = `[out:json];node(around:1000,${{lat}},${{lon}})[railway=station];out;`;
+                    const sRes = await fetch("https://overpass-api.de/api/interpreter?data=" + encodeURIComponent(query));
                     const sData = await sRes.json();
-                    if (sData.elements.length > 0) stationName = sData.elements[0].tags.name;
-                }} catch(e) {{}}
+                    if (sData.elements.length > 0) {{
+                        stationName = sData.elements[0].tags.name || "駅名なし";
+                    }}
+                } catch(e) {{}}
 
-                // 3. PDF保存
+                // 3. PDF生成
                 const {{ jsPDF }} = window.jspdf;
                 const doc = new jsPDF();
-                const originalWidth = {width};
-                const originalHeight = {height};
-                const maxWidth = 190;
-                const maxHeight = 260;
-                let pw = maxWidth;
-                let ph = (originalHeight * maxWidth) / originalWidth;
-                if (ph > maxHeight) {{
-                    ph = maxHeight;
-                    pw = (originalWidth * maxHeight) / originalHeight;
+                const oW = {width};
+                const oH = {height};
+                const maxW = 190;
+                const maxH = 260;
+                let pW = maxW;
+                let pH = (oH * maxW) / oW;
+                if (pH > maxH) {{
+                    pH = maxH;
+                    pW = (oW * maxH) / oH;
                 }}
 
-                doc.addImage(imgData, 'JPEG', 10, 20, pw, ph, undefined, 'NONE');
-                const fileName = aiTitle + "_" + (finalAddr || "住所不明") + "_" + stationName + ".pdf";
+                doc.addImage(imgData, 'JPEG', 10, 20, pW, pH, undefined, 'NONE');
+                
+                // ファイル名：タイトル_住所_駅名
+                const safeAddr = (finalAddr || "住所不明").replace(/[/\\?%*:|"<>]/g, '-');
+                const fileName = aiTitle + "_" + safeAddr + "_" + stationName + ".pdf";
+                
                 doc.save(fileName);
-                status.innerText = "✅ 保存完了: " + fileName;
+                statusDiv.style.color = "green";
+                statusDiv.innerText = "✅ 保存完了: " + fileName;
 
             }} catch (err) {{
-                status.innerText = "❌ エラーが発生しました。";
+                statusDiv.style.color = "red";
+                statusDiv.innerText = "❌ エラー: 位置情報または保存に失敗しました。";
             }}
         }}, (err) => {{
-            status.innerText = "📍 位置情報を許可してください。";
+            statusDiv.style.color = "orange";
+            statusDiv.innerText = "📍 位置情報を許可して、再度撮影してください。";
         }}, {{ enableHighAccuracy: true }});
     }})();
     </script>
     """
-    st.components.v1.html(full_process_script, height=100)
+    st.components.v1.html(full_process_script, height=120)

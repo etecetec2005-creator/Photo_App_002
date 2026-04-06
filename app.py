@@ -21,25 +21,29 @@ img_file = st.camera_input("写真を撮る")
 if img_file:
     # 1. 画像の読み込み
     img = Image.open(img_file)
-    width, height = img.size # 画像の元サイズを取得
+    width, height = img.size 
     st.image(img, caption="解析・保存中...")
 
     # 2. AI解析（タイトル生成）
     ai_title = "名称未設定"
     with st.spinner("AIが解析しています..."):
         try:
-            available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-            target_model = next((m for m in available_models if 'gemini-1.5-flash' in m), available_models[0])
+            # モデル取得ロジックの安定化
+            models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+            # flash 1.5 を優先、なければ最初に見つかったものを使用
+            target_model = next((m for m in models if 'gemini-1.5-flash' in m), models[0])
+            
             model = genai.GenerativeModel(target_model)
-            prompt = "この写真の内容を分析し、短い日本語タイトル（15文字以内）を1つ。結果のみ。"
+            prompt = "この写真の内容を分析し、短い日本語タイトル（15文字以内）を1つだけ出力してください。解説は不要です。"
             response = model.generate_content([prompt, img])
-            if response.text:
-                # ファイル名に使えない文字を置換
+            
+            if response and response.text:
                 ai_title = response.text.strip().replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").replace("/", "-")
-        except:
-            pass
+        except Exception as e:
+            # エラー内容を画面に表示（デバッグ用：運用時は削除可）
+            st.warning(f"AI解析に失敗しました（タイトルなしで進行します）: {e}")
 
-    # 3. 画像のBase64変換（最高画質設定）
+    # 3. 画像のBase64変換（最高画質）
     buffered = io.BytesIO()
     img.save(buffered, format="JPEG", quality=100, subsampling=0)
     img_str = base64.b64encode(buffered.getvalue()).decode()
@@ -71,7 +75,6 @@ if img_file:
                     const displayText = aiTitle + " _ " + finalAddr;
                     const fileName = aiTitle + "_" + finalAddr + ".jpg";
 
-                    // Canvasを使用して画像を加工
                     const canvas = document.createElement('canvas');
                     const ctx = canvas.getContext('2d');
                     const img = new Image();
@@ -79,45 +82,50 @@ if img_file:
                     img.onload = function() {{
                         canvas.width = originalWidth;
                         canvas.height = originalHeight;
-                        
-                        // 元画像を描画
                         ctx.drawImage(img, 0, 0, originalWidth, originalHeight);
                         
-                        // 文字のスタイル設定（画像サイズに合わせて調整）
-                        const fontSize = Math.floor(originalHeight / 25); 
+                        // 文字サイズとスタイル（画面比率に応じる）
+                        const fontSize = Math.floor(originalHeight / 30); 
                         ctx.font = "bold " + fontSize + "px sans-serif";
                         ctx.textBaseline = "top";
                         
-                        // テキストの背景（可読性向上のため）
-                        const textMetrics = ctx.measureText(displayText);
                         const padding = fontSize / 2;
-                        ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
-                        ctx.fillRect(10, 10, textMetrics.width + (padding * 2), fontSize + (padding * 2));
+                        const textMetrics = ctx.measureText(displayText);
                         
-                        // テキストを描画
+                        // 背景ボックス
+                        ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
+                        ctx.fillRect(20, 20, textMetrics.width + (padding * 2), fontSize + (padding * 2));
+                        
+                        // テキスト
                         ctx.fillStyle = "white";
-                        ctx.fillText(displayText, 10 + padding, 10 + padding);
+                        ctx.fillText(displayText, 20 + padding, 20 + padding);
                         
-                        // 加工後の画像をダウンロード
+                        // 保存処理
                         const link = document.createElement('a');
                         link.download = fileName;
-                        link.href = canvas.toDataURL('image/jpeg', 1.0); // 最高画質
+                        link.href = canvas.toDataURL('image/jpeg', 1.0);
                         link.click();
                         
-                        status.innerText = "✅ 画像内に文字を埋め込み保存しました: " + fileName;
+                        status.innerText = "✅ 保存完了: " + fileName;
                     }};
                     img.src = imgBase64;
 
                 }} catch (err) {{ 
-                    status.innerText = "エラーのため加工なしで保存します";
+                    status.innerText = "位置情報取得エラーのためタイトルのみで保存します";
                     const link = document.createElement('a');
                     link.download = aiTitle + ".jpg";
                     link.href = imgBase64;
                     link.click();
                 }}
             }},
-            (err) => {{ status.innerText = "位置情報を許可してください"; }},
-            {{ enableHighAccuracy: true }}
+            (err) => {{ 
+                status.innerText = "位置情報が許可されなかったためタイトルのみで保存します";
+                const link = document.createElement('a');
+                link.download = aiTitle + ".jpg";
+                link.href = imgBase64;
+                link.click();
+            }},
+            {{ enableHighAccuracy: true, timeout: 5000 }}
         );
     }})();
     </script>

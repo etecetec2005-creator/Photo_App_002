@@ -67,6 +67,14 @@ if img_file:
         const oW = {width};
         const oH = {height};
 
+        // 日時フォーマット(yymmddhhmm)の取得
+        const now = new Date();
+        const dateStr = now.getFullYear().toString().slice(-2) + 
+                        ('0' + (now.getMonth() + 1)).slice(-2) + 
+                        ('0' + now.getDate()).slice(-2) + 
+                        ('0' + now.getHours()).slice(-2) + 
+                        ('0' + now.getMinutes()).slice(-2);
+
         // 位置情報の取得（タイムアウト5秒設定）
         navigator.geolocation.getCurrentPosition(
             async (pos) => {{
@@ -94,7 +102,8 @@ if img_file:
             const displayText = aiTitle + " _ " + addr;
             // ファイル名から禁止文字を削除
             const safeAddr = addr.replace(/[/\\\\?%*:|"<>]/g, '-');
-            const fileName = aiTitle + "_" + safeAddr + ".jpg";
+            // ファイル名を「yymmddhhmm_タイトル_住所.jpg」に設定
+            const fileName = dateStr + "_" + aiTitle + "_" + safeAddr + ".jpg";
 
             const canvas = document.createElement('canvas');
             const ctx = canvas.getContext('2d');

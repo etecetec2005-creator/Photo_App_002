@@ -15,8 +15,8 @@ if not api_key:
 genai.configure(api_key=api_key)
 
 # --- 基本設定 ---
-st.set_page_config(page_title="自動写真保存 v2.5", layout="centered")
-st.title("📸 写真内容解析 & 保存")
+st.set_page_config(page_title="自動保存", layout="centered")
+st.title("📸 e-Photo")
 
 # カメラ入力 (Duplicate IDエラー防止のためkeyを固定)
 img_file = st.camera_input("写真を撮る", key="camera_v25")
